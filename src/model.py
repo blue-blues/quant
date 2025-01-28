@@ -54,23 +54,26 @@ class DQN(nn.Module):
         return self.output_layer(x)
 
 class Agent:
-    def __init__(self, config):
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    def __init__(self, config, device=None):
+        self.device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.config = config
         self.memory = deque(maxlen=config.MEMORY_SIZE)
         
-        # Create models and move to device
+        # Create models on specified device
         self.model = DQN(input_size=config.INPUT_SIZE).to(self.device)
         self.target_model = DQN(input_size=config.INPUT_SIZE).to(self.device)
         self.target_model.load_state_dict(self.model.state_dict())
         
         self.optimizer = optim.Adam(
             self.model.parameters(), 
-            lr=config.LEARNING_RATE,
-            betas=(0.9, 0.999),
-            eps=1e-8,
-            amsgrad=True
+            lr=config.LEARNING_RATE
         )
+        
+        # Enable GPU optimizations
+        if self.device.type == 'cuda':
+            self.model = torch.nn.DataParallel(self.model)
+            self.target_model = torch.nn.DataParallel(self.target_model)
+            torch.backends.cudnn.benchmark = True
         
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer,
@@ -99,11 +102,13 @@ class Agent:
         if random.random() < epsilon:
             return random.randint(0, 2)
         
-        self.model.eval()  # Set to evaluation mode
+        self.model.eval()
         with torch.no_grad():
-            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
-            q_values = self.model(state_tensor)
-            return q_values.cpu().argmax().item()
+            # Use updated autocast syntax
+            with torch.amp.autocast(device_type=self.device.type):
+                state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+                q_values = self.model(state_tensor)
+                return q_values.argmax().cpu().item()
     
     def train(self, batch_size):
         if len(self.memory) < batch_size:
@@ -126,19 +131,24 @@ class Agent:
         next_states = torch.FloatTensor(np.array(next_states)).to(self.device)
         dones = torch.BoolTensor(dones).to(self.device)
         
-        current_q_values = self.model(states).gather(1, actions.unsqueeze(1))
-        
-        with torch.no_grad():
-            next_actions = self.model(next_states).max(1)[1]
-            next_q_values = self.target_model(next_states).gather(1, next_actions.unsqueeze(1))
-            target_q_values = rewards + (1 - dones.float()) * self.config.GAMMA * next_q_values.squeeze()
-        
-        loss = nn.SmoothL1Loss()(current_q_values.squeeze(), target_q_values)
+        # Use updated autocast syntax
+        with torch.amp.autocast(device_type=self.device.type):
+            current_q_values = self.model(states).gather(1, actions.unsqueeze(1))
+            with torch.no_grad():
+                next_actions = self.model(next_states).max(1)[1]
+                next_q_values = self.target_model(next_states).gather(1, next_actions.unsqueeze(1))
+                target_q_values = rewards + (1 - dones.float()) * self.config.GAMMA * next_q_values.squeeze()
+            
+            loss = nn.SmoothL1Loss()(current_q_values.squeeze(), target_q_values)
         
         self.optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
         self.optimizer.step()
+        
+        # Clear GPU cache periodically
+        if self.steps % 100 == 0:
+            torch.cuda.empty_cache()
         
         return loss.item()
         

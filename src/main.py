@@ -4,6 +4,8 @@ from environment import TradingEnvironment
 from model import Agent
 import logging
 from pathlib import Path
+import torch
+import gc
 
 def setup_logging():
     logging.basicConfig(
@@ -11,6 +13,21 @@ def setup_logging():
         format='%(asctime)s - %(levelname)s - %(message)s'
     )
     return logging.getLogger(__name__)
+
+def setup_gpu():
+    """Configure GPU settings"""
+    if torch.cuda.is_available():
+        # Set memory growth
+        torch.cuda.empty_cache()
+        # Enable cudnn benchmark for better performance
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.enabled = True
+        device = torch.device('cuda')
+        print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+    else:
+        device = torch.device('cpu')
+        print("GPU not available, using CPU")
+    return device
 
 def load_or_download_data(cfg, logger):
     """Load existing data or download if necessary"""
@@ -39,13 +56,16 @@ def main():
     logger = setup_logging()
     cfg = config()
     
+    # Setup GPU
+    device = setup_gpu()
+    
     # Try to load or download data
     data_file = load_or_download_data(cfg, logger)
     
     # Initialize components with the correct data source
     data_loader = DataLoader(cfg, use_offline_data=True)
     env = TradingEnvironment(data_loader)
-    agent = Agent(cfg)
+    agent = Agent(cfg, device)
     
     best_reward = float('-inf')
     

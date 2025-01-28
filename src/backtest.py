@@ -17,7 +17,17 @@ class Backtest:
         self.cfg = config()
         self.data_loader = DataLoader(self.cfg)
         self.env = TradingEnvironment(self.data_loader, initial_balance)
-        self.agent = Agent(self.cfg)
+        
+        # Setup GPU
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if self.device.type == 'cuda':
+            torch.backends.cudnn.benchmark = True
+            torch.cuda.empty_cache()
+        
+        self.logger.info(f"Using device: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'}")
+        
+        # Initialize components with device
+        self.agent = Agent(self.cfg, self.device)
         
         try:
             self.agent.load(model_path)
@@ -148,10 +158,19 @@ class Backtest:
                 price_change = (current_price - prev_price) / prev_price
             
             # Get model's action probabilities
-            with torch.no_grad():
-                state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
-                q_values = self.agent.model(state_tensor)
-                action_probs = torch.softmax(q_values, dim=1).squeeze().cpu()
+            if self.device.type == 'cuda':
+                stream = torch.cuda.Stream()
+                with torch.cuda.stream(stream):
+                    # Use updated autocast syntax
+                    with torch.amp.autocast(device_type='cuda'):
+                        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+                        q_values = self.agent.model(state_tensor)
+                        action_probs = torch.softmax(q_values, dim=1).squeeze().cpu()
+            else:
+                with torch.no_grad():
+                    state_tensor = torch.FloatTensor(state).unsqueeze(0)
+                    q_values = self.agent.model(state_tensor)
+                    action_probs = torch.softmax(q_values, dim=1).squeeze()
             
             # Determine action based on position and market conditions
             if self.position_size == 0:  # No position
